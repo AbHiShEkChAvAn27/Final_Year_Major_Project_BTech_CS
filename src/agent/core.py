@@ -134,12 +134,15 @@ class EmbeddedSystemsAgent:
             print(f"Error: {e}")
             return False
 
-    async def process_request(self, user_input: str, platform: str = "", max_retries: int = 3, mode: str = "default", ssh_config: dict = None) -> Dict:
+    async def process_request(self, user_input: str, platform: str = "", max_retries: int = 3, mode: str = "default", ssh_config: dict = None, board_config: dict = None) -> Dict:
         """
         Handles both normal and board chat requests. Use mode="board" for board-specific chat.
         """
+        # Support legacy ssh_config parameter
+        if board_config is None and ssh_config is not None:
+            board_config = {"type": "ssh", **ssh_config}
         if mode == "board":
-            return await self.process_board_request(user_input, platform, max_retries, ssh_config=ssh_config)
+            return await self.process_board_request(user_input, platform, max_retries, board_config=board_config)
         
         NETWORK_ERRORS = ["10054", "10053", "10060", "ConnectionResetError", "ConnectionError", "TimeoutError"]
         
@@ -181,12 +184,33 @@ class EmbeddedSystemsAgent:
         
         return {"success": False, "error": "Request failed after retries."}
 
-    async def process_board_request(self, user_input: str, platform: str = "", max_retries: int = 3, ssh_config: dict = None) -> Dict:
+    async def process_board_request(self, user_input: str, platform: str = "", max_retries: int = 3, board_config: dict = None) -> Dict:
         """
-        Handles board-specific chat: LLM interprets user input, generates board command(s), sends to board, parses response, and explains to user.
-        Implements a single-step process: LLM generates command, agent executes, LLM explains output.
+        Handles board-specific chat: LLM interprets user input, generates board command(s),
+        sends to board, parses response, and explains to user.
+        Supports SSH (Raspberry Pi) and serial/arduino-cli (Arduino/ESP32).
         """
+        if board_config is None:
+            board_config = {}
         try:
+            conn_type = board_config.get("type", "")
+            serial_port = board_config.get("port", "")
+            fqbn = board_config.get("fqbn", "")
+
+            # Build connection context for the LLM
+            if conn_type == "ssh":
+                conn_hint = "Connection: SSH to Raspberry Pi. Use standard Linux shell commands (e.g. uptime, vcgencmd measure_temp, python3 script.py)."
+            elif conn_type == "serial":
+                port_hint = f" on port {serial_port}" if serial_port else ""
+                fqbn_hint = f" (FQBN: {fqbn})" if fqbn else ""
+                conn_hint = (
+                    f"Connection: USB serial{port_hint}{fqbn_hint}. "
+                    f"Use arduino-cli commands for compile/upload (e.g. arduino-cli compile, arduino-cli upload, arduino-cli monitor). "
+                    f"For direct serial communication, just provide the text to send."
+                )
+            else:
+                conn_hint = "Connection: Local shell. Use shell commands."
+
             # 1. LLM: Generate the exact shell command for the user request
             cmd_state = ProjectState(
                 messages=[
@@ -194,7 +218,7 @@ class EmbeddedSystemsAgent:
                     HumanMessage(content=(
                         f"Platform: {platform}\n"
                         f"You are connected to a {platform} board.\n"
-                        f"For raspberry pi use ssh and for arduino use arduino-cli\n"
+                        f"{conn_hint}\n"
                         f"User request: {user_input}\n"
                         f"Reply ONLY with the exact shell command to fulfill the user request, tailored to the detected board. No explanation, no output, no formatting. For example: uptime"
                     ))
@@ -210,28 +234,70 @@ class EmbeddedSystemsAgent:
 
             # 2. Send user command to board (platform-specific logic)
             def run_command(cmd):
-                def try_ssh_command(command):
+                conn_type = board_config.get("type", "")
+
+                # --- SSH (Raspberry Pi) ---
+                if conn_type == "ssh" and board_config.get("host") and board_config.get("user"):
                     try:
                         ssh = paramiko.SSHClient()
                         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                        ssh.connect(
-                            ssh_config["host"],
-                            username=ssh_config["user"],
-                            password=ssh_config.get("password"),
-                            timeout=5
-                        )
-                        stdin, stdout, stderr = ssh.exec_command(command, timeout=5)
+                        connect_kwargs = {
+                            "hostname": board_config["host"],
+                            "username": board_config["user"],
+                            "port": board_config.get("port", 22),
+                            "timeout": 10,
+                        }
+                        if board_config.get("key_file"):
+                            connect_kwargs["key_filename"] = board_config["key_file"]
+                        elif board_config.get("password"):
+                            connect_kwargs["password"] = board_config["password"]
+                        ssh.connect(**connect_kwargs)
+                        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=10)
                         output = stdout.read().decode().strip() or stderr.read().decode().strip()
                         ssh.close()
                         return output
                     except Exception as e:
                         return f"[SSH error: {e}]"
 
-                if platform.lower() == "raspberry_pi" and ssh_config and ssh_config.get("host") and ssh_config.get("user"):
-                    return try_ssh_command(cmd)
+                # --- Serial / arduino-cli (Arduino, ESP32) ---
+                elif conn_type == "serial":
+                    serial_port = board_config.get("port", "")
+                    baud = board_config.get("baud", 9600)
+                    fqbn = board_config.get("fqbn", "")
+
+                    # If command looks like an arduino-cli command, run it directly
+                    if cmd.strip().startswith("arduino-cli"):
+                        # Inject port/fqbn if not already in command
+                        if serial_port and "--port" not in cmd:
+                            cmd += f" --port {serial_port}"
+                        if fqbn and "--fqbn" not in cmd:
+                            cmd += f" --fqbn {fqbn}"
+                        try:
+                            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+                            return result.stdout.strip() or result.stderr.strip()
+                        except Exception as e:
+                            return f"[arduino-cli error: {e}]"
+
+                    # For serial monitor / reading output
+                    if serial_port:
+                        try:
+                            import serial
+                            ser = serial.Serial(serial_port, baud, timeout=3)
+                            # Send command to board
+                            ser.write((cmd + "\n").encode())
+                            import time
+                            time.sleep(1)
+                            output = ser.read(ser.in_waiting or 256).decode(errors="replace").strip()
+                            ser.close()
+                            return output if output else "[No response from board]"
+                        except Exception as e:
+                            return f"[Serial error: {e}]"
+                    return "[No serial port configured]"
+
+                # --- Fallback: local shell ---
                 else:
                     try:
-                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
+                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
                         output = result.stdout.strip() or result.stderr.strip()
                         return output
                     except Exception as e:

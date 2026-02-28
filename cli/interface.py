@@ -16,6 +16,8 @@ class EmbeddedSystemsCLI:
         self.agent = EmbeddedSystemsAgent(api_key)
         self.current_platform = ""
         self.detected_boards = []
+        self.active_board = None
+        self.board_config = {}
         self.session_history = []
 
     def _auto_detect_boards(self):
@@ -28,6 +30,7 @@ class EmbeddedSystemsCLI:
             for i, b in enumerate(self.detected_boards, 1):
                 port = b.get('port', 'N/A')
                 print(f"   {i}. {b['board']} — {b['platform']} on {port}")
+            idx = 0
             if len(self.detected_boards) > 1:
                 try:
                     choice = input(f"Select board [1-{len(self.detected_boards)}] (default 1): ").strip()
@@ -35,11 +38,55 @@ class EmbeddedSystemsCLI:
                     idx = max(0, min(idx, len(self.detected_boards) - 1))
                 except ValueError:
                     idx = 0
-                self.current_platform = self.detected_boards[idx]["platform"]
+            self.active_board = self.detected_boards[idx]
+            self.current_platform = self.active_board["platform"]
             print(f"🎯 Active platform: {self.current_platform}")
+
+            # Prompt for board-specific credentials
+            self._configure_board_credentials()
         else:
             print("⚠️  No boards detected. Connect a board via USB and type 'rescan'.")
             self.current_platform = ""
+            self.active_board = None
+            self.board_config = {}
+
+    def _configure_board_credentials(self):
+        """Prompt for credentials based on detected board type."""
+        if not self.active_board:
+            self.board_config = {}
+            return
+
+        platform = self.active_board["platform"]
+
+        if platform == "raspberry_pi":
+            print("\n🔑 Raspberry Pi SSH credentials required:")
+            host = input("   Host/IP [localhost]: ").strip() or "localhost"
+            user = input("   Username [pi]: ").strip() or "pi"
+            password = input("   Password (leave blank if using SSH key): ").strip()
+            key_file = ""
+            if not password:
+                key_file = input("   SSH Key Path [~/.ssh/id_rsa]: ").strip() or "~/.ssh/id_rsa"
+            port = input("   SSH Port [22]: ").strip() or "22"
+            self.board_config = {
+                "type": "ssh",
+                "host": host, "user": user,
+                "password": password, "key_file": key_file,
+                "port": int(port),
+            }
+            print("✅ SSH config saved.")
+
+        elif platform in ["arduino", "esp32"]:
+            serial_port = self.active_board.get("port", "")
+            fqbn = self.active_board.get("fqbn", "")
+            print(f"\n🔌 Serial config: port={serial_port}  baud=115200  fqbn={fqbn or 'N/A'}")
+            self.board_config = {
+                "type": "serial",
+                "port": serial_port,
+                "baud": 115200,
+                "fqbn": fqbn,
+            }
+        else:
+            self.board_config = {}
 
     async def run_interactive_session(self):
         """Run enhanced interactive session"""
@@ -91,7 +138,7 @@ class EmbeddedSystemsCLI:
         if not question:
             return
         print("🤔 Thinking...")
-        result = await self.agent.process_request(question, self.current_platform)
+        result = await self.agent.process_request(question, self.current_platform, board_config=self.board_config)
         if result["success"]:
             print(f"\n💡 {result['response']}")
             self.session_history.append({"type": "chat", "question": question, "timestamp": result['timestamp']})

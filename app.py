@@ -85,15 +85,23 @@ with st.sidebar:
         st.warning("No boards detected. Connect a board via USB and click **Refresh Boards**.")
         platform = ""
 
-    # SSH config for Raspberry Pi boards
-    if platform == "raspberry_pi":
-        st.subheader("🔗 Raspberry Pi SSH Config")
-        ssh_host = st.text_input("RPi Host (IP or hostname)", key="ssh_host")
-        ssh_user = st.text_input("RPi Username", key="ssh_user")
-        ssh_pass = st.text_input("RPi Password", type="password", key="ssh_pass")
-        st.session_state["ssh_config"] = {"host": ssh_host, "user": ssh_user, "password": ssh_pass}
+    # --- Board-specific config (auto-set for Arduino/ESP32, SSH asked in Chat with Board tab) ---
+    if platform in ["arduino", "esp32"] and boards:
+        active_board = boards[st.session_state.get("selected_board_idx", 0)] if len(boards) > 1 else boards[0]
+        serial_port = active_board.get("port", "")
+        fqbn = active_board.get("fqbn", "")
+        baud = 115200  # sensible default
+        st.info(f"🔌 Auto-detected: **{serial_port}** @ {baud} baud" + (f"  •  FQBN: `{fqbn}`" if fqbn else ""))
+        st.session_state["board_config"] = {
+            "type": "serial",
+            "port": serial_port, "baud": baud, "fqbn": fqbn,
+        }
+    elif platform == "raspberry_pi":
+        # SSH credentials will be entered in the Chat with Board tab
+        if "board_config" not in st.session_state or st.session_state["board_config"].get("type") != "ssh":
+            st.session_state["board_config"] = {"type": "ssh"}
     else:
-        st.session_state["ssh_config"] = {}
+        st.session_state["board_config"] = {}
 
     if st.button("Initialize Agent"):
         init_agent(platform)
@@ -210,6 +218,26 @@ with tab_history:
 
 with tab_board:
     st.subheader("🛠️ Chat with Board")
+
+    # --- Show SSH config form inside this tab when RPi is detected ---
+    if platform == "raspberry_pi":
+        with st.expander("🔑 Raspberry Pi SSH Configuration", expanded=not st.session_state.get("board_config", {}).get("host")):
+            ssh_host = st.text_input("RPi Host (IP or hostname)", key="ssh_host")
+            ssh_user = st.text_input("RPi Username", value="pi", key="ssh_user")
+            ssh_pass = st.text_input("RPi Password", type="password", key="ssh_pass")
+            ssh_key = st.text_input("SSH Key Path (optional)", placeholder="~/.ssh/id_rsa", key="ssh_key")
+            ssh_port = st.number_input("SSH Port", value=22, min_value=1, max_value=65535, key="ssh_port")
+            st.session_state["board_config"] = {
+                "type": "ssh",
+                "host": ssh_host, "user": ssh_user,
+                "password": ssh_pass, "key_file": ssh_key,
+                "port": int(ssh_port),
+            }
+            if ssh_host and ssh_user:
+                st.success(f"SSH configured: {ssh_user}@{ssh_host}:{ssh_port}")
+            else:
+                st.warning("Enter SSH credentials above to chat with your Raspberry Pi.")
+
     if 'board_messages' not in st.session_state:
         st.session_state['board_messages'] = []
 
@@ -225,8 +253,8 @@ with tab_board:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                ssh_config = st.session_state.get("ssh_config", {})
-                result = asyncio.run(agent.process_request(board_prompt, platform, mode="board", ssh_config=ssh_config))
+                board_config = st.session_state.get("board_config", {})
+                result = asyncio.run(agent.process_request(board_prompt, platform, mode="board", board_config=board_config))
                 if result["success"]:
                     st.markdown(result["response"])
                     st.session_state['board_messages'].append({"role": "assistant", "content": result["response"]})
