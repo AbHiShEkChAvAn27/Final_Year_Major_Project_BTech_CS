@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from src.agent import EmbeddedSystemsAgent
+from src.hardware.detector import detect_all_boards, get_platform_from_boards, format_board_summary
 
 
 class EmbeddedSystemsCLI:
@@ -14,18 +15,46 @@ class EmbeddedSystemsCLI:
     def __init__(self, api_key: str):
         self.agent = EmbeddedSystemsAgent(api_key)
         self.current_platform = ""
+        self.detected_boards = []
         self.session_history = []
+
+    def _auto_detect_boards(self):
+        """Scan for connected boards and set platform automatically."""
+        print("\n🔍 Scanning for connected boards...")
+        self.detected_boards = detect_all_boards()
+        if self.detected_boards:
+            self.current_platform = get_platform_from_boards(self.detected_boards)
+            print(f"✅ Found {len(self.detected_boards)} board(s):")
+            for i, b in enumerate(self.detected_boards, 1):
+                port = b.get('port', 'N/A')
+                print(f"   {i}. {b['board']} — {b['platform']} on {port}")
+            if len(self.detected_boards) > 1:
+                try:
+                    choice = input(f"Select board [1-{len(self.detected_boards)}] (default 1): ").strip()
+                    idx = int(choice) - 1 if choice else 0
+                    idx = max(0, min(idx, len(self.detected_boards) - 1))
+                except ValueError:
+                    idx = 0
+                self.current_platform = self.detected_boards[idx]["platform"]
+            print(f"🎯 Active platform: {self.current_platform}")
+        else:
+            print("⚠️  No boards detected. Connect a board via USB and type 'rescan'.")
+            self.current_platform = ""
 
     async def run_interactive_session(self):
         """Run enhanced interactive session"""
         print("🤖 Embedded Systems AI Agent")
         print("=" * 50)
-        print("Commands: chat, generate, project, search, knowledge, tools, platform, history, help, quit")
+
+        # Auto-detect boards on startup
+        self._auto_detect_boards()
+
+        print("\nCommands: chat, generate, project, search, knowledge, tools, rescan, history, help, quit")
         print("=" * 50)
 
         while True:
             try:
-                command = input(f"\n[{self.current_platform or 'general'}] > ").strip().lower()
+                command = input(f"\n[{self.current_platform or 'no board'}] > ").strip().lower()
 
                 if command == "quit":
                     print("👋 Goodbye!")
@@ -42,8 +71,8 @@ class EmbeddedSystemsCLI:
                     await self._handle_knowledge()
                 elif command == "tools":
                     self._show_tools()
-                elif command == "platform":
-                    self._set_platform()
+                elif command == "rescan":
+                    self._auto_detect_boards()
                 elif command == "history":
                     self._show_history()
                 elif command == "help":
@@ -70,7 +99,10 @@ class EmbeddedSystemsCLI:
             print(f"❌ {result['error']}")
 
     async def _handle_generate(self):
-        platform = self.current_platform or input("Platform (arduino/esp32/raspberry_pi): ").strip().lower()
+        if not self.current_platform:
+            print("⚠️  No board detected. Connect a board and type 'rescan'.")
+            return
+        platform = self.current_platform
         requirements = input("Describe what you want: ").strip()
         if not requirements:
             return
@@ -83,7 +115,10 @@ class EmbeddedSystemsCLI:
             print(f"❌ {result['error']}")
 
     async def _handle_project(self):
-        platform = self.current_platform or input("Platform: ").strip().lower()
+        if not self.current_platform:
+            print("⚠️  No board detected. Connect a board and type 'rescan'.")
+            return
+        platform = self.current_platform
         name = input("Project name: ").strip()
         requirements = input("Requirements: ").strip()
         if not name or not requirements:
@@ -116,17 +151,6 @@ class EmbeddedSystemsCLI:
         for t in tools:
             print(f"  - {t}")
 
-    def _set_platform(self):
-        platform = input("Platform (arduino/esp32/raspberry_pi/clear): ").strip().lower()
-        if platform == "clear":
-            self.current_platform = ""
-            print("✅ Cleared")
-        elif platform in ["arduino", "esp32", "raspberry_pi"]:
-            self.current_platform = platform
-            print(f"✅ Set to {platform}")
-        else:
-            print("❌ Invalid")
-
     def _show_history(self):
         if not self.session_history:
             print("📝 No history")
@@ -144,7 +168,7 @@ class EmbeddedSystemsCLI:
   search    - Web search
   knowledge - Add documents
   tools     - List tools
-  platform  - Set platform
+  rescan    - Re-detect connected boards
   history   - View history
   help      - Show this
   quit      - Exit

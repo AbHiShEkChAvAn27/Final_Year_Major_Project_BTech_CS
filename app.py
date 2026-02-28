@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from src.agent import EmbeddedSystemsAgent
 from src.ui import extract_mermaid, render_mermaid
 from src.tools.power_estimator import power_profile_estimator_fn
+from src.hardware.detector import detect_all_boards, get_platform_from_boards, format_board_summary
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,7 +23,7 @@ st.set_page_config(page_title="Embedded Systems AI Agent", layout="wide", page_i
 st.title("🤖 Embedded Systems AI Agent")
 
 # Session state
-for key, default in [("agent", None), ("platform", ""), ("projects_list", []), ("messages", [])]:
+for key, default in [("agent", None), ("platform", ""), ("projects_list", []), ("messages", []), ("detected_boards", []), ("selected_board_idx", 0)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -46,10 +47,45 @@ def handle_rate_limit(msg):
     st.info("💡 Free tier: 20 requests/day. Consider upgrading.")
 
 
+# --- Board Auto-Detection ---
+def refresh_boards():
+    """Scan for connected boards and update session state."""
+    boards = detect_all_boards()
+    st.session_state["detected_boards"] = boards
+    if boards:
+        st.session_state["platform"] = get_platform_from_boards(boards)
+    else:
+        st.session_state["platform"] = ""
+
+# Auto-detect on first load
+if not st.session_state["detected_boards"]:
+    refresh_boards()
+
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
-    platform = st.selectbox("Platform", ["", "arduino", "esp32", "raspberry_pi"])
+
+    # --- Detected Boards Section ---
+    st.subheader("🔌 Connected Boards")
+    if st.button("🔄 Refresh Boards"):
+        refresh_boards()
+        st.rerun()
+
+    boards = st.session_state["detected_boards"]
+    if boards:
+        st.markdown(format_board_summary(boards))
+        if len(boards) > 1:
+            board_labels = [f"{b['board']} ({b.get('port','')})" for b in boards]
+            selected_idx = st.selectbox("Active board", range(len(board_labels)), format_func=lambda i: board_labels[i], key="selected_board_idx")
+            platform = boards[selected_idx]["platform"]
+        else:
+            platform = boards[0]["platform"]
+        st.success(f"Platform: **{platform}**")
+    else:
+        st.warning("No boards detected. Connect a board via USB and click **Refresh Boards**.")
+        platform = ""
+
+    # SSH config for Raspberry Pi boards
     if platform == "raspberry_pi":
         st.subheader("🔗 Raspberry Pi SSH Config")
         ssh_host = st.text_input("RPi Host (IP or hostname)", key="ssh_host")
@@ -58,6 +94,7 @@ with st.sidebar:
         st.session_state["ssh_config"] = {"host": ssh_host, "user": ssh_user, "password": ssh_pass}
     else:
         st.session_state["ssh_config"] = {}
+
     if st.button("Initialize Agent"):
         init_agent(platform)
     
